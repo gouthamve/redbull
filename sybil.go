@@ -79,7 +79,7 @@ func (sy *sybil) writeSpan(span *model.Span) error {
 
 	sy.numSpans++
 
-	if sy.numSpans >= 1000 {
+	if sy.numSpans >= 256 {
 		sy.flushAndClearBuffer()
 	}
 
@@ -225,7 +225,7 @@ func (sy *sybil) findTraceIDs(ctx context.Context, query *spanstore.TraceQueryPa
 	}
 
 	flags := generateFlagsFromQuery(query)
-	flags = append([]string{"query", "-table", "jaeger", "-json", "-dir", sy.cfg.DBPath}, flags...)
+	flags = append([]string{"query", "-table", "jaeger", "-json", "-dir", sy.cfg.DBPath, "-read-log"}, flags...)
 	cmd := exec.CommandContext(ctx, sy.cfg.BinPath, flags...)
 
 	out, err := cmd.CombinedOutput()
