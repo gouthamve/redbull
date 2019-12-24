@@ -25,6 +25,8 @@ const (
 	durationKey        = "_idx_duration"
 	tagPrefix          = "_idx_tag_"
 	traceIDKey         = "traceID"
+
+	maxRecordsInFlight = 256
 )
 
 var (
@@ -48,6 +50,12 @@ var (
 
 	// ErrNotSupported during development, don't support every option - yet
 	ErrNotSupported = errors.New("this query parameter is not supported yet")
+
+	bufPool = sync.Pool{
+		New: func() interface{} {
+			return new(bytes.Buffer)
+		},
+	}
 )
 
 type sybilConfig struct {
@@ -133,7 +141,7 @@ func (sy *sybil) writeSpan(span *model.Span) error {
 
 	sy.numSpans++
 
-	if sy.numSpans >= 256 {
+	if sy.numSpans >= maxRecordsInFlight {
 		sy.flushAndClearBuffer()
 	}
 
@@ -170,23 +178,27 @@ func jsonFromSpan(span *model.Span) ([]byte, error) {
 }
 
 func (sy *sybil) flushAndClearBuffer() {
-	jsonbytes := sy.buffer.Bytes()
-	sy.buffer = bytes.NewBuffer(make([]byte, 0, len(jsonbytes)))
+	oldBuf := sy.buffer
+	sy.buffer = bufPool.Get().(*bytes.Buffer)
+	sy.buffer.Reset()
 	sy.numSpans = 0
 
-	go sy.flushJSON(jsonbytes)
+	go sy.flushJSON(oldBuf)
 }
 
-func (sy *sybil) flushJSON(input []byte) {
+func (sy *sybil) flushJSON(buf *bytes.Buffer) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
 	cmd := exec.CommandContext(ctx, sy.cfg.BinPath, "ingest", "-table", "jaeger", "-dir", sy.cfg.DBPath)
-	cmd.Stdin = bytes.NewReader(input)
+	cmd.Stdin = bytes.NewReader(buf.Bytes())
 
 	if out, err := cmd.CombinedOutput(); err != nil {
 		logger.Error("sybil flush json", "err", err, "message", string(out))
 	}
+
+	buf.Reset()
+	bufPool.Put(buf)
 }
 
 func (sy *sybil) getServices(ctx context.Context) ([]string, error) {
