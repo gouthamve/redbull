@@ -90,14 +90,18 @@ func (sy *sybil) start() {
 }
 
 func (sy *sybil) retentionLoop() {
-	ticker := time.NewTicker(10 * time.Minute)
-	defer ticker.Stop()
+	retentionTicker := time.NewTicker(10 * time.Minute)
+	digestTicker := time.NewTicker(2 * time.Second)
+	defer retentionTicker.Stop()
+	defer digestTicker.Stop()
 	for {
 		select {
 		case <-sy.done:
 			return
-		case <-ticker.C:
+		case <-retentionTicker.C:
 			sy.deleteOldData(sy.cfg.Retention)
+		case <-digestTicker.C:
+			sy.digestRowStore()
 		}
 	}
 }
@@ -106,12 +110,27 @@ func (sy *sybil) stop() {
 	close(sy.done)
 }
 
+func (sy *sybil) digestRowStore() {
+	start := time.Now()
+	ctx, cancel := context.WithTimeout(context.Background(), 25*time.Second)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, sy.cfg.BinPath, "digest", "-debug", "-table", "jaeger", "-dir", sy.cfg.DBPath)
+
+	if out, err := cmd.CombinedOutput(); err != nil {
+		logger.Error("sybil digest", "err", err, "message", string(out))
+	}
+
+	logger.Warn("sybil digest", "duration", time.Since(start).String())
+	return
+}
+
 func (sy *sybil) deleteOldData(retention time.Duration) {
 	if retention == 0 {
 		return
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
 	retentionTime := time.Now().Add(-retention).UnixNano() / 1000
@@ -119,7 +138,7 @@ func (sy *sybil) deleteOldData(retention time.Duration) {
 		"-time-col", "time", "-before", strconv.FormatInt(retentionTime, 10), "-delete", "-really")
 
 	if out, err := cmd.CombinedOutput(); err != nil {
-		logger.Error("sybil flush json", "err", err, "message", string(out))
+		logger.Error("sybil trim", "err", err, "message", string(out))
 	}
 
 	return
@@ -190,7 +209,7 @@ func (sy *sybil) flushJSON(buf *bytes.Buffer) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	cmd := exec.CommandContext(ctx, sy.cfg.BinPath, "ingest", "-table", "jaeger", "-dir", sy.cfg.DBPath)
+	cmd := exec.CommandContext(ctx, sy.cfg.BinPath, "ingest", "-table", "jaeger", "-dir", sy.cfg.DBPath, "-skip-compact")
 	cmd.Stdin = bytes.NewReader(buf.Bytes())
 
 	if out, err := cmd.CombinedOutput(); err != nil {
@@ -270,6 +289,7 @@ type queryResult struct {
 }
 
 func (sy *sybil) findTraceIDs(ctx context.Context, query *spanstore.TraceQueryParameters) ([]model.TraceID, error) {
+	start := time.Now()
 	if err := validateQuery(query); err != nil {
 		return nil, err
 	}
@@ -294,7 +314,9 @@ func (sy *sybil) findTraceIDs(ctx context.Context, query *spanstore.TraceQueryPa
 	}
 
 	flags := generateFlagsFromQuery(query)
-	flags = append([]string{"query", "-table", "jaeger", "-json", "-dir", sy.cfg.DBPath, "-read-log"}, flags...)
+	flags = append([]string{"query", "-table", "jaeger", "-json", "-dir", sy.cfg.DBPath}, flags...)
+	logger.Warn("sybil query", "flags", flags)
+
 	cmd := exec.CommandContext(ctx, sy.cfg.BinPath, flags...)
 
 	out, err := cmd.CombinedOutput()
@@ -318,6 +340,7 @@ func (sy *sybil) findTraceIDs(ctx context.Context, query *spanstore.TraceQueryPa
 		traceIDs = append(traceIDs, tid)
 	}
 
+	logger.Warn("sybil query", "duration", time.Since(start).String())
 	return traceIDs, nil
 }
 
@@ -360,8 +383,6 @@ func generateFlagsFromQuery(query *spanstore.TraceQueryParameters) []string {
 	if len(strFilters) > 0 {
 		flags = append(flags, "-str-filter", strings.Join(strFilters, ","))
 	}
-
-	logger.Warn("flags", "flags", flags)
 
 	return flags
 }
