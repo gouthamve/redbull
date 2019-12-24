@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"path/filepath"
 	"time"
 
 	"github.com/dgraph-io/badger"
@@ -21,14 +22,16 @@ type redbull struct {
 
 type config struct {
 	retention time.Duration
+	dataDir   string
 }
 
 func newRedBull() (*redbull, error) {
 	cfg := config{
 		retention: 24 * time.Hour,
+		dataDir:   "/home/goutham/go/src/github.com/gouthamve/redbull/",
 	}
 
-	db, err := badger.Open(badger.DefaultOptions("/home/goutham/go/src/github.com/gouthamve/redbull/badger-db"))
+	db, err := badger.Open(badger.DefaultOptions(filepath.Join(cfg.dataDir, "badger-db")))
 	if err != nil {
 		return nil, err
 	}
@@ -38,7 +41,7 @@ func newRedBull() (*redbull, error) {
 
 		sybil: newSybil(sybilConfig{
 			BinPath:   "sybil",
-			DBPath:    "/home/goutham/go/src/github.com/gouthamve/redbull/db",
+			DBPath:    filepath.Join(cfg.dataDir, "sybil-db"),
 			Retention: cfg.retention,
 		}),
 		badger: db,
