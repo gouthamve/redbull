@@ -103,12 +103,12 @@ func (sy *sybil) deleteOldData(retention time.Duration) {
 		return
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 
-	retentionTime := time.Now().Add(-retention).Unix()
+	retentionTime := time.Now().Add(-retention).UnixNano() / 1000
 	cmd := exec.CommandContext(ctx, sy.cfg.BinPath, "trim", "-table", "jaeger", "-dir", sy.cfg.DBPath,
-		"-time-col", "time", strconv.FormatInt(retentionTime, 10), "-delete", "-really")
+		"-time-col", "time", "-before", strconv.FormatInt(retentionTime, 10), "-delete", "-really")
 
 	if out, err := cmd.CombinedOutput(); err != nil {
 		logger.Error("sybil flush json", "err", err, "message", string(out))
@@ -148,8 +148,8 @@ func jsonFromSpan(span *model.Span) ([]byte, error) {
 	// These 3 are special. The reason for the first two is that there is a GetServices() and GetOperations()
 	// lookup on the global space. I can think of easy ways to do this in a jaeger tuned columnar store, because its
 	// just loading the symbol table and not the entire column. For now, we use this hack.
-	inputMap[serviceOpPrefix+span.Process.ServiceName+serviceOpSeparator+span.OperationName] = true
-	inputMap[serviceOnlyPrefix+span.Process.ServiceName] = true
+	inputMap[serviceOpPrefix+span.Process.ServiceName+serviceOpSeparator+span.OperationName] = 1
+	inputMap[serviceOnlyPrefix+span.Process.ServiceName] = 1
 	inputMap[durationKey] = span.Duration.Nanoseconds()
 
 	for _, kv := range span.Tags {
