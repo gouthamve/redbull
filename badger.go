@@ -2,13 +2,14 @@ package main
 
 import (
 	"encoding/binary"
+	"time"
 
 	"github.com/dgraph-io/badger"
 	"github.com/gogo/protobuf/proto"
 	"github.com/jaegertracing/jaeger/model"
 )
 
-func writeSpanToDB(db *badger.DB, span *model.Span) error {
+func writeSpanToDB(db *badger.DB, span *model.Span, expiryTime time.Time) error {
 	// Write to KV Store.
 	key := make([]byte, sizeOfTraceID+8+8)
 	pos := 0
@@ -29,8 +30,9 @@ func writeSpanToDB(db *badger.DB, span *model.Span) error {
 	}
 
 	entry := &badger.Entry{
-		Key:   key,
-		Value: bb,
+		Key:       key,
+		Value:     bb,
+		ExpiresAt: uint64(expiryTime.Unix()),
 	}
 
 	return db.Update(func(txn *badger.Txn) error {

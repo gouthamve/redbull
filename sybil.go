@@ -53,6 +53,8 @@ var (
 type sybilConfig struct {
 	BinPath string `json:"bin_path"`
 	DBPath  string `json:"db_path"`
+
+	Retention time.Duration `json:"retention"`
 }
 
 type sybil struct {
@@ -61,6 +63,58 @@ type sybil struct {
 	sync.Mutex
 	numSpans int
 	buffer   *bytes.Buffer
+
+	done chan struct{}
+}
+
+func newSybil(cfg sybilConfig) sybil {
+	return sybil{
+		cfg: cfg,
+
+		buffer: bytes.NewBuffer(nil),
+
+		done: make(chan struct{}),
+	}
+}
+
+func (sy *sybil) start() {
+	go sy.retentionLoop()
+}
+
+func (sy *sybil) retentionLoop() {
+	ticker := time.NewTicker(10 * time.Minute)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-sy.done:
+			return
+		case <-ticker.C:
+			sy.deleteOldData(sy.cfg.Retention)
+		}
+	}
+}
+
+func (sy *sybil) stop() {
+	close(sy.done)
+}
+
+func (sy *sybil) deleteOldData(retention time.Duration) {
+	if retention == 0 {
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	retentionTime := time.Now().Add(-retention).Unix()
+	cmd := exec.CommandContext(ctx, sy.cfg.BinPath, "trim", "-table", "jaeger", "-dir", sy.cfg.DBPath,
+		"-time-col", "time", strconv.FormatInt(retentionTime, 10), "-delete", "-really")
+
+	if out, err := cmd.CombinedOutput(); err != nil {
+		logger.Error("sybil flush json", "err", err, "message", string(out))
+	}
+
+	return
 }
 
 func (sy *sybil) writeSpan(span *model.Span) error {
@@ -91,6 +145,9 @@ func jsonFromSpan(span *model.Span) ([]byte, error) {
 	inputMap := make(map[string]interface{})
 	inputMap[timeKey] = model.TimeAsEpochMicroseconds(span.StartTime)
 
+	// These 3 are special. The reason for the first two is that there is a GetServices() and GetOperations()
+	// lookup on the global space. I can think of easy ways to do this in a jaeger tuned columnar store, because its
+	// just loading the symbol table and not the entire column. For now, we use this hack.
 	inputMap[serviceOpPrefix+span.Process.ServiceName+serviceOpSeparator+span.OperationName] = true
 	inputMap[serviceOnlyPrefix+span.Process.ServiceName] = true
 	inputMap[durationKey] = span.Duration.Nanoseconds()

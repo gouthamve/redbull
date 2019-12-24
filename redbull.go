@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bytes"
 	"context"
 	"time"
 
@@ -14,31 +13,44 @@ import (
 const sizeOfTraceID = 16
 
 type redbull struct {
+	cfg config
+
 	sybil  sybil
 	badger *badger.DB
 }
 
+type config struct {
+	retention time.Duration
+}
+
 func newRedBull() (*redbull, error) {
+	cfg := config{
+		retention: 24 * time.Hour,
+	}
+
 	db, err := badger.Open(badger.DefaultOptions("/home/goutham/go/src/github.com/gouthamve/redbull/badger-db"))
 	if err != nil {
 		return nil, err
 	}
 
-	return &redbull{
-		sybil: sybil{
-			cfg: sybilConfig{
-				"sybil",
-				"/home/goutham/go/src/github.com/gouthamve/redbull/db",
-			},
+	rb := &redbull{
+		cfg: cfg,
 
-			buffer: bytes.NewBuffer(nil),
-		},
-
+		sybil: newSybil(sybilConfig{
+			BinPath:   "sybil",
+			DBPath:    "/home/goutham/go/src/github.com/gouthamve/redbull/db",
+			Retention: cfg.retention,
+		}),
 		badger: db,
-	}, nil
+	}
+
+	rb.sybil.start()
+
+	return rb, nil
 }
 
 func (rb *redbull) Close() error {
+	rb.sybil.stop()
 	return rb.badger.Close()
 }
 
@@ -79,7 +91,7 @@ func (rb *redbull) FindTraceIDs(ctx context.Context, query *spanstore.TraceQuery
 }
 func (rb *redbull) WriteSpan(span *model.Span) error {
 	// Write to KV Store.
-	if err := writeSpanToDB(rb.badger, span); err != nil {
+	if err := writeSpanToDB(rb.badger, span, time.Now().Add(rb.cfg.retention)); err != nil {
 		return err
 	}
 
