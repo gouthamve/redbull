@@ -315,13 +315,14 @@ func generateFlagsFromQuery(query *spanstore.TraceQueryParameters) []string {
 	intFilters := []string{}
 	strFilters := []string{}
 
-	if query.OperationName == "" {
-		groupColumns = append(groupColumns, serviceOnlyPrefix+query.ServiceName)
-	} else {
-		groupColumns = append(groupColumns, serviceOpPrefix+query.ServiceName+serviceOpSeparator+query.OperationName)
-	}
 	groupColumns = append(groupColumns, traceIDKey)
 
+	// service and operation filters.
+	if query.OperationName == "" {
+		intFilters = append(intFilters, serviceOnlyPrefix+query.ServiceName+":eq:1")
+	} else {
+		intFilters = append(intFilters, serviceOpPrefix+query.ServiceName+serviceOpSeparator+query.OperationName+":eq:1")
+	}
 	// StartTime filters.
 	lt := strconv.FormatUint(model.TimeAsEpochMicroseconds(query.StartTimeMax), 10)
 	gt := strconv.FormatUint(model.TimeAsEpochMicroseconds(query.StartTimeMin), 10)
