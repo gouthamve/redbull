@@ -60,6 +60,7 @@ func getTraceFromDB(db *badger.DB, traceID model.TraceID) (*model.Trace, error) 
 }
 
 func getTracesFromDB(db *badger.DB, traceIDs []model.TraceID) ([]*model.Trace, error) {
+	start := time.Now()
 	// Get by PK
 	traces := make([]*model.Trace, 0, len(traceIDs))
 	prefixes := make([][]byte, 0, len(traceIDs))
@@ -102,6 +103,7 @@ func getTracesFromDB(db *badger.DB, traceIDs []model.TraceID) ([]*model.Trace, e
 		return nil
 	})
 
+	logger.Warn("badger query", "duration", time.Since(start).String(), "num_traces", len(traces))
 	return traces, err
 }
 
