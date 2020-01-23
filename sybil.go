@@ -26,7 +26,7 @@ const (
 	tagPrefix          = "_idx_tag_"
 	traceIDKey         = "traceID"
 
-	maxRecordsInFlight = 256
+	maxSybilRecordsInFlight = 1024
 )
 
 var (
@@ -160,7 +160,7 @@ func (sy *sybil) writeSpan(span *model.Span) error {
 
 	sy.numSpans++
 
-	if sy.numSpans >= maxRecordsInFlight {
+	if sy.numSpans >= maxSybilRecordsInFlight {
 		sy.flushAndClearBuffer()
 	}
 
