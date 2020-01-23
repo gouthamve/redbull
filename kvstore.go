@@ -9,10 +9,14 @@ import (
 	"github.com/jaegertracing/jaeger/model"
 )
 
+const maxKVRecordsInFlight = 256
+
 type kvstore struct {
 	retention time.Duration
 
 	badger *badger.DB
+
+	entriesInFlight []*badger.Entry
 }
 
 func newKVStore(dir string, retention time.Duration) (*kvstore, error) {
@@ -25,22 +29,13 @@ func newKVStore(dir string, retention time.Duration) (*kvstore, error) {
 	}, nil
 }
 
-func (kv *kvstore) start() {
-	go func() {
-
-	}()
-}
-
 func (kv *kvstore) stop() error {
 	return kv.badger.Close()
 }
 
 func (kv *kvstore) addSpan(span *model.Span) error {
-	return writeSpanToDB(kv.badger, span, time.Now().Add(kv.retention))
-}
+	expiryTime := time.Now().Add(kv.retention)
 
-func writeSpanToDB(db *badger.DB, span *model.Span, expiryTime time.Time) error {
-	// Write to KV Store.
 	key := make([]byte, sizeOfTraceID+8+8)
 	pos := 0
 	binary.BigEndian.PutUint64(key[pos:], span.TraceID.High)
@@ -65,16 +60,25 @@ func writeSpanToDB(db *badger.DB, span *model.Span, expiryTime time.Time) error 
 		ExpiresAt: uint64(expiryTime.Unix()),
 	}
 
-	return db.Update(func(txn *badger.Txn) error {
-		// Write the entries
-		err = txn.SetEntry(entry)
-		if err != nil {
-			// Most likely primary key conflict, but let the caller check this
-			return err
-		}
+	kv.entriesInFlight = append(kv.entriesInFlight, entry)
+	if len(kv.entriesInFlight) >= maxKVRecordsInFlight {
+		err = kv.badger.Update(func(txn *badger.Txn) error {
+			// Write the entries
+			for i := range kv.entriesInFlight {
+				err = txn.SetEntry(kv.entriesInFlight[i])
+				if err != nil {
+					// Most likely primary key conflict, but let the caller check this
+					return err
+				}
+			}
 
-		return nil
-	})
+			return nil
+		})
+
+		kv.entriesInFlight = kv.entriesInFlight[:0]
+	}
+
+	return err
 }
 
 func (kv *kvstore) getTrace(traceID model.TraceID) (*model.Trace, error) {
