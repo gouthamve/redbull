@@ -5,7 +5,6 @@ import (
 	"path/filepath"
 	"time"
 
-	"github.com/dgraph-io/badger"
 	"github.com/jaegertracing/jaeger/model"
 	"github.com/jaegertracing/jaeger/storage/dependencystore"
 	"github.com/jaegertracing/jaeger/storage/spanstore"
@@ -16,8 +15,8 @@ const sizeOfTraceID = 16
 type redbull struct {
 	cfg config
 
-	sybil  sybil
-	badger *badger.DB
+	sybil sybil
+	kv    *kvstore
 }
 
 type config struct {
@@ -31,7 +30,7 @@ func newRedBull() (*redbull, error) {
 		dataDir:   "/home/goutham/go/src/github.com/gouthamve/redbull/",
 	}
 
-	db, err := badger.Open(badger.DefaultOptions(filepath.Join(cfg.dataDir, "badger-db")))
+	kv, err := newKVStore(filepath.Join(cfg.dataDir, "badger-db"), cfg.retention)
 	if err != nil {
 		return nil, err
 	}
@@ -44,7 +43,7 @@ func newRedBull() (*redbull, error) {
 			DBPath:    filepath.Join(cfg.dataDir, "sybil-db"),
 			Retention: cfg.retention,
 		}),
-		badger: db,
+		kv: kv,
 	}
 
 	rb.sybil.start()
@@ -54,7 +53,7 @@ func newRedBull() (*redbull, error) {
 
 func (rb *redbull) Close() error {
 	rb.sybil.stop()
-	return rb.badger.Close()
+	return rb.kv.stop()
 }
 
 func (rb *redbull) DependencyReader() dependencystore.Reader {
@@ -73,7 +72,7 @@ func (rb *redbull) GetDependencies(endTs time.Time, lookback time.Duration) ([]m
 	return nil, nil
 }
 func (rb *redbull) GetTrace(ctx context.Context, traceID model.TraceID) (*model.Trace, error) {
-	return getTraceFromDB(rb.badger, traceID)
+	return rb.kv.getTrace(traceID)
 }
 func (rb *redbull) GetServices(ctx context.Context) ([]string, error) {
 	return rb.sybil.getServices(ctx)
@@ -87,14 +86,14 @@ func (rb *redbull) FindTraces(ctx context.Context, query *spanstore.TraceQueryPa
 		return nil, err
 	}
 
-	return getTracesFromDB(rb.badger, traceIDs)
+	return rb.kv.getTraces(traceIDs)
 }
 func (rb *redbull) FindTraceIDs(ctx context.Context, query *spanstore.TraceQueryParameters) ([]model.TraceID, error) {
 	return rb.sybil.findTraceIDs(ctx, query)
 }
 func (rb *redbull) WriteSpan(span *model.Span) error {
 	// Write to KV Store.
-	if err := writeSpanToDB(rb.badger, span, time.Now().Add(rb.cfg.retention)); err != nil {
+	if err := rb.kv.addSpan(span); err != nil {
 		return err
 	}
 

@@ -9,6 +9,36 @@ import (
 	"github.com/jaegertracing/jaeger/model"
 )
 
+type kvstore struct {
+	retention time.Duration
+
+	badger *badger.DB
+}
+
+func newKVStore(dir string, retention time.Duration) (*kvstore, error) {
+	db, err := badger.Open(badger.DefaultOptions(dir))
+	if err != nil {
+		return nil, err
+	}
+	return &kvstore{
+		badger: db,
+	}, nil
+}
+
+func (kv *kvstore) start() {
+	go func() {
+
+	}()
+}
+
+func (kv *kvstore) stop() error {
+	return kv.badger.Close()
+}
+
+func (kv *kvstore) addSpan(span *model.Span) error {
+	return writeSpanToDB(kv.badger, span, time.Now().Add(kv.retention))
+}
+
 func writeSpanToDB(db *badger.DB, span *model.Span, expiryTime time.Time) error {
 	// Write to KV Store.
 	key := make([]byte, sizeOfTraceID+8+8)
@@ -47,8 +77,8 @@ func writeSpanToDB(db *badger.DB, span *model.Span, expiryTime time.Time) error 
 	})
 }
 
-func getTraceFromDB(db *badger.DB, traceID model.TraceID) (*model.Trace, error) {
-	traces, err := getTracesFromDB(db, []model.TraceID{traceID})
+func (kv *kvstore) getTrace(traceID model.TraceID) (*model.Trace, error) {
+	traces, err := kv.getTraces([]model.TraceID{traceID})
 	if err != nil {
 		return nil, err
 	}
@@ -59,7 +89,7 @@ func getTraceFromDB(db *badger.DB, traceID model.TraceID) (*model.Trace, error) 
 	return nil, nil
 }
 
-func getTracesFromDB(db *badger.DB, traceIDs []model.TraceID) ([]*model.Trace, error) {
+func (kv *kvstore) getTraces(traceIDs []model.TraceID) ([]*model.Trace, error) {
 	start := time.Now()
 	// Get by PK
 	traces := make([]*model.Trace, 0, len(traceIDs))
@@ -69,7 +99,7 @@ func getTracesFromDB(db *badger.DB, traceIDs []model.TraceID) ([]*model.Trace, e
 		prefixes = append(prefixes, createPrimaryKeySeekPrefix(traceID))
 	}
 
-	err := db.View(func(txn *badger.Txn) error {
+	err := kv.badger.View(func(txn *badger.Txn) error {
 		opts := badger.DefaultIteratorOptions
 		it := txn.NewIterator(opts)
 		defer it.Close()
