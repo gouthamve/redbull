@@ -185,11 +185,6 @@ func jsonFromSpan(span *model.Span) ([]byte, error) {
 	for _, kv := range span.Process.Tags {
 		inputMap[tagPrefix+kv.Key] = kv.AsString()
 	}
-	for _, log := range span.Logs {
-		for _, kv := range log.Fields {
-			inputMap[tagPrefix+kv.Key] = kv.AsString()
-		}
-	}
 
 	inputMap[traceIDKey] = span.TraceID.String()
 
