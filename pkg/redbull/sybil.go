@@ -314,7 +314,7 @@ func (sy *sybil) findTraceIDs(ctx context.Context, query *spanstore.TraceQueryPa
 	}
 
 	flags := generateFlagsFromQuery(query)
-	flags = append([]string{"query", "-table", "jaeger", "-json", "-dir", sy.cfg.DBPath}, flags...)
+	flags = append([]string{"query", "-table", "jaeger", "-json", "-dir", sy.cfg.DBPath, "-cache-queries"}, flags...)
 	logger.Warnw("sybil query", "flags", flags)
 
 	// Stop digestion while a query is running.
