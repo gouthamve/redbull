@@ -209,7 +209,7 @@ func (sy *sybil) flushJSON(buf *bytes.Buffer) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	cmd := exec.CommandContext(ctx, sy.cfg.BinPath, "ingest", "-table", "jaeger", "-dir", sy.cfg.DBPath, "-skip-compact")
+	cmd := exec.CommandContext(ctx, sy.cfg.BinPath, "ingest", "-table", "jaeger", "-dir", sy.cfg.DBPath, "-skip-compact", "-save-srb")
 	cmd.Stdin = bytes.NewReader(buf.Bytes())
 
 	if out, err := cmd.CombinedOutput(); err != nil {
@@ -340,7 +340,7 @@ func (sy *sybil) findTraceIDs(ctx context.Context, query *spanstore.TraceQueryPa
 		traceIDs = append(traceIDs, tid)
 	}
 
-	logger.Warn("sybil query", "duration", time.Since(start).String())
+	logger.Warn("sybil query", "duration", time.Since(start).String(), "traceIDs", len(traceIDs))
 	return traceIDs, nil
 }
 
