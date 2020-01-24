@@ -73,6 +73,8 @@ type sybil struct {
 	buffer   *bytes.Buffer
 
 	done chan struct{}
+
+	digestMtx sync.Mutex
 }
 
 func newSybil(cfg sybilConfig) sybil {
@@ -115,11 +117,14 @@ func (sy *sybil) digestRowStore() {
 	ctx, cancel := context.WithTimeout(context.Background(), 25*time.Second)
 	defer cancel()
 
+	sy.digestMtx.Lock()
 	cmd := exec.CommandContext(ctx, sy.cfg.BinPath, "digest", "-debug", "-table", "jaeger", "-dir", sy.cfg.DBPath)
 
 	if out, err := cmd.CombinedOutput(); err != nil {
 		logger.Errorw("sybil digest", "err", err, "message", string(out))
 	}
+
+	sy.digestMtx.Unlock()
 
 	logger.Warnw("sybil digest", "duration", time.Since(start).String())
 	return
@@ -312,9 +317,13 @@ func (sy *sybil) findTraceIDs(ctx context.Context, query *spanstore.TraceQueryPa
 	flags = append([]string{"query", "-table", "jaeger", "-json", "-dir", sy.cfg.DBPath}, flags...)
 	logger.Warnw("sybil query", "flags", flags)
 
+	// Stop digestion while a query is running.
+	// TODO: This means that only one query can run at a time and digestion is blocked.
+	sy.digestMtx.Lock()
 	cmd := exec.CommandContext(ctx, sy.cfg.BinPath, flags...)
-
 	out, err := cmd.CombinedOutput()
+	sy.digestMtx.Unlock()
+
 	if err != nil {
 		logger.Errorw("error querying", "err", err, "message", string(out))
 		return nil, err
