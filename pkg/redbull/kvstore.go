@@ -28,7 +28,8 @@ func newKVStore(dir string, retention time.Duration) (*kvstore, error) {
 		return nil, err
 	}
 	return &kvstore{
-		badger: db,
+		badger:    db,
+		retention: retention,
 	}, nil
 }
 
