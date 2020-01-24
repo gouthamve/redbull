@@ -2,6 +2,7 @@ package redbull
 
 import (
 	"encoding/binary"
+	"sync"
 	"time"
 
 	"github.com/dgraph-io/badger"
@@ -17,6 +18,8 @@ type kvstore struct {
 	badger *badger.DB
 
 	entriesInFlight []*badger.Entry
+
+	entriesMutex sync.Mutex
 }
 
 func newKVStore(dir string, retention time.Duration) (*kvstore, error) {
@@ -60,6 +63,7 @@ func (kv *kvstore) addSpan(span *model.Span) error {
 		ExpiresAt: uint64(expiryTime.Unix()),
 	}
 
+	kv.entriesMutex.Lock()
 	kv.entriesInFlight = append(kv.entriesInFlight, entry)
 	if len(kv.entriesInFlight) >= maxKVRecordsInFlight {
 		err = kv.badger.Update(func(txn *badger.Txn) error {
@@ -77,6 +81,7 @@ func (kv *kvstore) addSpan(span *model.Span) error {
 
 		kv.entriesInFlight = kv.entriesInFlight[:0]
 	}
+	kv.entriesMutex.Unlock()
 
 	return err
 }
