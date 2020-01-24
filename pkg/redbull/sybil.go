@@ -320,9 +320,13 @@ func (sy *sybil) findTraceIDs(ctx context.Context, query *spanstore.TraceQueryPa
 	// Stop digestion while a query is running.
 	// TODO: This means that only one query can run at a time and digestion is blocked.
 	sy.digestMtx.Lock()
+	cmdStartTime := time.Now()
 	cmd := exec.CommandContext(ctx, sy.cfg.BinPath, flags...)
 	out, err := cmd.CombinedOutput()
+	cmdEndTime := time.Now()
 	sy.digestMtx.Unlock()
+
+	logger.Warnw("sybil query command exec", "duration", cmdEndTime.Sub(cmdStartTime).String())
 
 	if err != nil {
 		logger.Errorw("error querying", "err", err, "message", string(out))
