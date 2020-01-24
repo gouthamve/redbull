@@ -9,11 +9,11 @@ require (
 	github.com/gogo/protobuf v1.3.1
 	github.com/hashicorp/go-hclog v0.9.2
 	github.com/hashicorp/go-plugin v1.0.1 // indirect
-	github.com/jaegertracing/jaeger v1.14.0
+	github.com/jaegertracing/jaeger v1.16.0
 	github.com/opentracing/opentracing-go v1.1.0 // indirect
 	github.com/prometheus/common v0.4.0
-	github.com/spf13/viper v1.4.0 // indirect
-	github.com/uber/jaeger-lib v2.2.0+incompatible // indirect
-	go.uber.org/zap v1.11.0 // indirect
+	github.com/spf13/viper v1.4.0
+	github.com/uber/jaeger-lib v2.2.0+incompatible
+	go.uber.org/zap v1.11.0
 	google.golang.org/grpc v1.24.0 // indirect
 )

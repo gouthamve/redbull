@@ -1,4 +1,4 @@
-redbull
+./redbull
 db/
 badger-db/
 sybil-db

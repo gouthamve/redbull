@@ -1,4 +1,4 @@
-package main
+package redbull
 
 import (
 	"bytes"
@@ -118,10 +118,10 @@ func (sy *sybil) digestRowStore() {
 	cmd := exec.CommandContext(ctx, sy.cfg.BinPath, "digest", "-debug", "-table", "jaeger", "-dir", sy.cfg.DBPath)
 
 	if out, err := cmd.CombinedOutput(); err != nil {
-		logger.Error("sybil digest", "err", err, "message", string(out))
+		logger.Errorw("sybil digest", "err", err, "message", string(out))
 	}
 
-	logger.Warn("sybil digest", "duration", time.Since(start).String())
+	logger.Warnw("sybil digest", "duration", time.Since(start).String())
 	return
 }
 
@@ -138,7 +138,7 @@ func (sy *sybil) deleteOldData(retention time.Duration) {
 		"-time-col", "time", "-before", strconv.FormatInt(retentionTime, 10), "-delete", "-really")
 
 	if out, err := cmd.CombinedOutput(); err != nil {
-		logger.Error("sybil trim", "err", err, "message", string(out))
+		logger.Errorw("sybil trim", "err", err, "message", string(out))
 	}
 
 	return
@@ -213,7 +213,7 @@ func (sy *sybil) flushJSON(buf *bytes.Buffer) {
 	cmd.Stdin = bytes.NewReader(buf.Bytes())
 
 	if out, err := cmd.CombinedOutput(); err != nil {
-		logger.Error("sybil flush json", "err", err, "message", string(out))
+		logger.Errorw("sybil flush json", "err", err, "message", string(out))
 	}
 
 	buf.Reset()
@@ -272,7 +272,7 @@ func (sy *sybil) getIntColumns(ctx context.Context) ([]string, error) {
 
 	out, err := cmd.CombinedOutput()
 	if err != nil {
-		logger.Error("err", err, "message", string(out))
+		logger.Errorw("err", err, "message", string(out))
 		return nil, err
 	}
 
@@ -315,13 +315,13 @@ func (sy *sybil) findTraceIDs(ctx context.Context, query *spanstore.TraceQueryPa
 
 	flags := generateFlagsFromQuery(query)
 	flags = append([]string{"query", "-table", "jaeger", "-json", "-dir", sy.cfg.DBPath}, flags...)
-	logger.Warn("sybil query", "flags", flags)
+	logger.Warnw("sybil query", "flags", flags)
 
 	cmd := exec.CommandContext(ctx, sy.cfg.BinPath, flags...)
 
 	out, err := cmd.CombinedOutput()
 	if err != nil {
-		logger.Error("err", err, "message", string(out))
+		logger.Errorw("error querying", "err", err, "message", string(out))
 		return nil, err
 	}
 
@@ -340,7 +340,7 @@ func (sy *sybil) findTraceIDs(ctx context.Context, query *spanstore.TraceQueryPa
 		traceIDs = append(traceIDs, tid)
 	}
 
-	logger.Warn("sybil query", "duration", time.Since(start).String(), "traceIDs", len(traceIDs))
+	logger.Warnw("sybil query", "duration", time.Since(start).String(), "traceIDs", len(traceIDs))
 	return traceIDs, nil
 }
 

@@ -1,4 +1,4 @@
-package main
+package redbull
 
 import (
 	"encoding/binary"
@@ -137,7 +137,7 @@ func (kv *kvstore) getTraces(traceIDs []model.TraceID) ([]*model.Trace, error) {
 		return nil
 	})
 
-	logger.Warn("badger query", "duration", time.Since(start).String(), "num_traces", len(traces))
+	logger.Warnw("badger query", "duration", time.Since(start).String(), "num_traces", len(traces))
 	return traces, err
 }
 
