@@ -23,6 +23,7 @@ const (
 
 	retentionFlag = "redbull.retention"
 	dataDirFlag   = "redbull.data-dir"
+	binPathFlag   = "redbull.sybil-path"
 )
 
 // Factory is the redbull factory that implements storage.Factory.
@@ -40,12 +41,14 @@ func NewFactory() *Factory {
 func (f *Factory) AddFlags(flagset *flag.FlagSet) {
 	flagset.Duration(retentionFlag, 24*time.Hour, "The retention period for redbull.")
 	flagset.String(dataDirFlag, "/data/", "The data directory for redbull.")
+	flagset.String(binPathFlag, "sybil", "The path to the sybil binary.")
 }
 
 // InitFromViper implements plugin.Configurable.
 func (f *Factory) InitFromViper(v *viper.Viper) {
 	f.cfg.retention = v.GetDuration(retentionFlag)
 	f.cfg.dataDir = v.GetString(dataDirFlag)
+	f.cfg.sybilBinpath = v.GetString(binPathFlag)
 }
 
 // Initialize implements storage.Factory.
@@ -83,6 +86,8 @@ type redbull struct {
 type Config struct {
 	retention time.Duration
 	dataDir   string
+
+	sybilBinpath string
 }
 
 // NewRedBull creates a redbull instance.
@@ -96,7 +101,7 @@ func NewRedBull(cfg Config) (*redbull, error) {
 		cfg: cfg,
 
 		sybil: newSybil(sybilConfig{
-			BinPath:   "sybil",
+			BinPath:   cfg.sybilBinpath,
 			DBPath:    filepath.Join(cfg.dataDir, "sybil-db"),
 			Retention: cfg.retention,
 		}),

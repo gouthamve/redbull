@@ -5,7 +5,11 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"io/ioutil"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -27,6 +31,9 @@ const (
 	traceIDKey         = "traceID"
 
 	maxSybilRecordsInFlight = 1024
+
+	maxRecordInFuture = 15 * time.Minute
+	maxRecordInPast   = 15 * time.Minute
 )
 
 var (
@@ -51,11 +58,17 @@ var (
 	// ErrNotSupported during development, don't support every option - yet
 	ErrNotSupported = errors.New("this query parameter is not supported yet")
 
+	errDropSpanCuzBlockDoesntExistfmt = "error block doesn't exist, period: %d, span start time: %s"
+
 	bufPool = sync.Pool{
 		New: func() interface{} {
 			return new(bytes.Buffer)
 		},
 	}
+
+	periodPerBlock = time.Hour.Nanoseconds()
+
+	emptyJSONBytes = []byte("{}\n")
 )
 
 type sybilConfig struct {
@@ -68,42 +81,47 @@ type sybilConfig struct {
 type sybil struct {
 	cfg sybilConfig
 
-	sync.Mutex
-	numSpans int
-	buffer   *bytes.Buffer
+	numSpansMtx sync.Mutex
+	numSpans    int
+
+	blocksMtx sync.RWMutex
+	blocks    map[int]*sybilBlock
 
 	done chan struct{}
-
-	digestMtx sync.RWMutex
 }
 
 func newSybil(cfg sybilConfig) sybil {
 	return sybil{
 		cfg: cfg,
 
-		buffer: bytes.NewBuffer(nil),
+		blocks: make(map[int]*sybilBlock),
 
 		done: make(chan struct{}),
 	}
 }
 
 func (sy *sybil) start() {
+	if err := sy.refreshBlocks(); err != nil {
+		logger.Errorw("startup refresh", "err", err)
+	}
 	go sy.loop()
 }
 
 func (sy *sybil) loop() {
-	retentionTicker := time.NewTicker(10 * time.Minute)
 	digestTicker := time.NewTicker(2 * time.Second)
-	defer retentionTicker.Stop()
+	refreshBlocksTicker := time.NewTicker(2 * time.Minute)
 	defer digestTicker.Stop()
+	defer refreshBlocksTicker.Stop()
 	for {
 		select {
 		case <-sy.done:
 			return
-		case <-retentionTicker.C:
-			sy.deleteOldData(sy.cfg.Retention)
 		case <-digestTicker.C:
 			sy.digestRowStore()
+		case <-refreshBlocksTicker.C:
+			if err := sy.refreshBlocks(); err != nil {
+				logger.Errorw("refresh blocks", "err", err)
+			}
 		}
 	}
 }
@@ -112,133 +130,169 @@ func (sy *sybil) stop() {
 	close(sy.done)
 }
 
-func (sy *sybil) digestRowStore() {
-	start := time.Now()
-	ctx, cancel := context.WithTimeout(context.Background(), 25*time.Second)
-	defer cancel()
-
-	sy.digestMtx.Lock()
-	cmd := exec.CommandContext(ctx, sy.cfg.BinPath, "digest", "-debug", "-table", "jaeger", "-dir", sy.cfg.DBPath)
-
-	if out, err := cmd.CombinedOutput(); err != nil {
-		logger.Errorw("sybil digest", "err", err, "message", string(out))
-	}
-
-	sy.digestMtx.Unlock()
-
-	logger.Warnw("sybil digest", "duration", time.Since(start).String())
-	return
-}
-
-func (sy *sybil) deleteOldData(retention time.Duration) {
-	if retention == 0 {
-		return
-	}
-	start := time.Now()
-
-	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Second)
-	defer cancel()
-
-	// Generate the flags for deletion
-	retentionTime := time.Now().Add(-retention).UnixNano() / 1000
-	flags := []string{"-time-col", "time", "-before", strconv.FormatInt(retentionTime, 10), "-delete", "-really"}
-	flags = append([]string{"trim", "-table", "jaeger", "-dir", sy.cfg.DBPath}, flags...)
-	logger.Warnw("sybil trim", "flags", flags)
-
-	cmd := exec.CommandContext(ctx, sy.cfg.BinPath, flags...)
-
-	if out, err := cmd.CombinedOutput(); err != nil {
-		logger.Errorw("sybil trim", "err", err, "message", string(out))
-	}
-
-	logger.Warnw("sybil trim exec", "duration", time.Since(start).String())
-	return
-}
-
-func (sy *sybil) writeSpan(span *model.Span) error {
-	byt, err := jsonFromSpan(span)
+func (sy *sybil) refreshBlocks() error {
+	// TODO: Refactor this mess and implement retention.
+	// Get a list of tables. TODO: Implement this in sybil itself.
+	files, err := ioutil.ReadDir(sy.cfg.DBPath)
 	if err != nil {
-		return err
+		if os.IsNotExist(err) {
+			if err := os.MkdirAll(sy.cfg.DBPath, 0777); err != nil {
+				return err
+			}
+		} else {
+
+			return err
+		}
 	}
-	byt = append(byt, []byte("\n")...)
-
-	sy.Lock()
-	_, err = sy.buffer.Write(byt)
-	if err != nil {
-		sy.Unlock()
-		return err
-	}
-
-	sy.numSpans++
-
-	if sy.numSpans >= maxSybilRecordsInFlight {
-		sy.flushAndClearBuffer()
-	}
-
-	sy.Unlock()
-	return nil
-}
-
-func jsonFromSpan(span *model.Span) ([]byte, error) {
-	inputMap := make(map[string]interface{})
-	inputMap[timeKey] = model.TimeAsEpochMicroseconds(span.StartTime)
-
-	// These 3 are special. The reason for the first two is that there is a GetServices() and GetOperations()
-	// lookup on the global space. I can think of easy ways to do this in a jaeger tuned columnar store, because its
-	// just loading the symbol table and not the entire column. For now, we use this hack.
-	inputMap[serviceOpPrefix+span.Process.ServiceName+serviceOpSeparator+span.OperationName] = 1
-	inputMap[serviceOnlyPrefix+span.Process.ServiceName] = 1
-	inputMap[durationKey] = span.Duration.Nanoseconds()
-
-	for _, kv := range span.Tags {
-		inputMap[tagPrefix+kv.Key] = kv.AsString()
-	}
-	for _, kv := range span.Process.Tags {
-		inputMap[tagPrefix+kv.Key] = kv.AsString()
-	}
-
-	inputMap[traceIDKey] = span.TraceID.String()
-
-	return json.Marshal(inputMap)
-}
-
-func (sy *sybil) flushAndClearBuffer() {
-	oldBuf := sy.buffer
-	sy.buffer = bufPool.Get().(*bytes.Buffer)
-	sy.buffer.Reset()
-	sy.numSpans = 0
-
-	go sy.flushJSON(oldBuf)
-}
-
-func (sy *sybil) flushJSON(buf *bytes.Buffer) {
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
-	cmd := exec.CommandContext(ctx, sy.cfg.BinPath, "ingest", "-table", "jaeger", "-dir", sy.cfg.DBPath, "-skip-compact", "-save-srb")
-	cmd.Stdin = bytes.NewReader(buf.Bytes())
-
-	if out, err := cmd.CombinedOutput(); err != nil {
-		logger.Errorw("sybil flush json", "err", err, "message", string(out))
-	}
-
-	buf.Reset()
-	bufPool.Put(buf)
-}
-
-func (sy *sybil) getServices(ctx context.Context) ([]string, error) {
-	cols, err := sy.getIntColumns(ctx)
-	if err != nil {
-		return nil, err
-	}
-
-	services := make([]string, 0, 10)
-	for _, col := range cols {
-		if !strings.HasPrefix(col, serviceOnlyPrefix) {
+	existingTables := make(map[int]struct{}, len(files))
+	for _, file := range files {
+		if !file.IsDir() {
+			logger.Warnw("list tables", "msg", "non directory file", "file", file.Name())
 			continue
 		}
 
-		services = append(services, strings.TrimPrefix(col, serviceOnlyPrefix))
+		i, err := strconv.Atoi(file.Name())
+		if err != nil {
+			logger.Warnw("list tables", "msg", "non int table", "table", file.Name())
+			continue
+		}
+
+		existingTables[i] = struct{}{}
+	}
+
+	start := time.Now()
+	minWriteAblePeriod := int(time.Now().Add(-maxRecordInPast).UnixNano() / periodPerBlock)
+	maxWriteAblePeriod := int(time.Now().Add(maxRecordInFuture).UnixNano() / periodPerBlock)
+	minPeriodToExist := int(time.Now().Add(-sy.cfg.Retention).UnixNano() / periodPerBlock)
+
+	tablesToExist := make(map[int]struct{}, len(existingTables))
+	for i := minPeriodToExist; i <= maxWriteAblePeriod; i++ {
+		tablesToExist[i] = struct{}{}
+	}
+	fmt.Println(minWriteAblePeriod, maxWriteAblePeriod, minPeriodToExist)
+
+	blocksDeleted := 0
+	// Nuke all tables that shouldn't exist.
+	for i := range existingTables {
+		if _, ok := tablesToExist[i]; !ok {
+			sy.blocksMtx.Lock()
+			delete(sy.blocks, i)
+			sy.blocksMtx.Unlock()
+
+			logger.Infow("nuking table", "table", i)
+			if err := os.RemoveAll(filepath.Join(sy.cfg.DBPath, strconv.Itoa(i))); err != nil {
+				logger.Errorw("nuking table", "table", i, "err", err)
+				return err
+			}
+			blocksDeleted++
+		}
+	}
+
+	blocksToCreate := map[int]*sybilBlock{}
+
+	sy.blocksMtx.Lock()
+	for i := range sy.blocks {
+		if _, ok := tablesToExist[i]; !ok {
+			delete(sy.blocks, i)
+		}
+	}
+
+	for i := range tablesToExist {
+		if _, ok := sy.blocks[i]; !ok {
+			block := newSybilBlock(sy.cfg.BinPath, sy.cfg.DBPath, i)
+			sy.blocks[i] = block
+			blocksToCreate[i] = block
+		}
+	}
+	sy.blocksMtx.Unlock()
+
+	numMutabilitySet := 0
+	sy.blocksMtx.RLock()
+	for blockPeriod, block := range sy.blocks {
+		if blockPeriod >= minWriteAblePeriod {
+			continue
+		}
+
+		if !block.getMutable() {
+			continue
+		}
+
+		block.setMutable(false)
+		numMutabilitySet++
+	}
+	sy.blocksMtx.RUnlock()
+
+	for _, block := range blocksToCreate {
+		block.runIngest(emptyJSONBytes[:])
+	}
+
+	logger.Infow("refresh block status", "duration", time.Since(start).String(), "mutability_changes", numMutabilitySet, "blocks_deleted", blocksDeleted, "blocks_created", len(blocksToCreate))
+
+	return nil
+}
+
+func (sy *sybil) digestRowStore() {
+	sy.blocksMtx.RLock()
+	for _, block := range sy.blocks {
+		block.digestRowStore()
+	}
+	sy.blocksMtx.RUnlock()
+}
+
+func (sy *sybil) writeSpan(span *model.Span) error {
+	periodForSpan := int(span.StartTime.UnixNano() / periodPerBlock)
+
+	sy.blocksMtx.RLock()
+	block, ok := sy.blocks[periodForSpan]
+	sy.blocksMtx.RUnlock()
+	if !ok {
+		return fmt.Errorf(errDropSpanCuzBlockDoesntExistfmt, periodForSpan, span.StartTime.String())
+	}
+
+	if err := block.writeSpan(span); err != nil {
+		return err
+	}
+
+	sy.numSpansMtx.Lock()
+
+	sy.numSpans++
+	if sy.numSpans >= maxSybilRecordsInFlight {
+		sy.flushAndClearBuffer()
+		sy.numSpans = 0
+	}
+
+	sy.numSpansMtx.Unlock()
+	return nil
+}
+
+func (sy *sybil) flushAndClearBuffer() {
+	sy.blocksMtx.RLock()
+	for _, block := range sy.blocks {
+		block.flushAndClearBuffer()
+	}
+	sy.blocksMtx.RUnlock()
+}
+
+func (sy *sybil) getServices(ctx context.Context) ([]string, error) {
+	servicesMap := make(map[string]struct{})
+
+	sy.blocksMtx.RLock()
+	defer sy.blocksMtx.RUnlock()
+
+	for _, block := range sy.blocks {
+		services, err := block.getServices(ctx)
+		if err != nil {
+			return nil, err
+		}
+
+		for _, svc := range services {
+			servicesMap[svc] = struct{}{}
+		}
+	}
+
+	services := make([]string, 0, len(servicesMap))
+	for svc := range servicesMap {
+		services = append(services, svc)
 	}
 
 	sort.Strings(services)
@@ -247,47 +301,30 @@ func (sy *sybil) getServices(ctx context.Context) ([]string, error) {
 }
 
 func (sy *sybil) getOperations(ctx context.Context, service string) ([]string, error) {
-	cols, err := sy.getIntColumns(ctx)
+	opsMap := make(map[string]struct{})
 
-	if err != nil {
-		return nil, err
-	}
+	sy.blocksMtx.RLock()
+	defer sy.blocksMtx.RUnlock()
 
-	ops := []string{}
-	prefix := serviceOpPrefix + service + serviceOpSeparator
-	for _, col := range cols {
-		if !strings.HasPrefix(col, prefix) {
-			continue
+	for _, block := range sy.blocks {
+		ops, err := block.getOperations(ctx, service)
+		if err != nil {
+			return nil, err
 		}
 
-		ops = append(ops, strings.TrimPrefix(col, prefix))
+		for _, op := range ops {
+			opsMap[op] = struct{}{}
+		}
+	}
+
+	ops := make([]string, 0, len(opsMap))
+	for op := range opsMap {
+		ops = append(ops, op)
 	}
 
 	sort.Strings(ops)
+
 	return ops, nil
-}
-
-type tableInfo struct {
-	Columns struct {
-		Ints []string `json:"ints"`
-	} `json:"columns"`
-}
-
-func (sy *sybil) getIntColumns(ctx context.Context) ([]string, error) {
-	cmd := exec.CommandContext(ctx, sy.cfg.BinPath, "query", "-table", "jaeger", "-info", "-json", "-dir", sy.cfg.DBPath)
-
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		logger.Errorw("err", err, "message", string(out))
-		return nil, err
-	}
-
-	ti := &tableInfo{}
-	if err := json.Unmarshal(out, ti); err != nil {
-		return nil, err
-	}
-
-	return ti.Columns.Ints, nil
 }
 
 type queryResult struct {
@@ -295,67 +332,68 @@ type queryResult struct {
 }
 
 func (sy *sybil) findTraceIDs(ctx context.Context, query *spanstore.TraceQueryParameters) ([]model.TraceID, error) {
-	start := time.Now()
-	if err := validateQuery(query); err != nil {
-		return nil, err
-	}
+	return nil, nil
+	//start := time.Now()
+	//if err := validateQuery(query); err != nil {
+	//return nil, err
+	//}
 
-	// Make sure the column exists.
-	validOp := false || query.OperationName == ""
-	if !validOp {
-		ops, err := sy.getOperations(ctx, query.ServiceName)
-		if err != nil {
-			return nil, err
-		}
-		for _, op := range ops {
-			if op == query.OperationName {
-				validOp = true
-			}
-		}
-	}
+	//// Make sure the column exists.
+	//validOp := false || query.OperationName == ""
+	//if !validOp {
+	//ops, err := sy.getOperations(ctx, query.ServiceName)
+	//if err != nil {
+	//return nil, err
+	//}
+	//for _, op := range ops {
+	//if op == query.OperationName {
+	//validOp = true
+	//}
+	//}
+	//}
 
-	// Short circuit if the operation doesn't exist in db.
-	if !validOp {
-		return nil, nil
-	}
+	//// Short circuit if the operation doesn't exist in db.
+	//if !validOp {
+	//return nil, nil
+	//}
 
-	flags := generateFlagsFromQuery(query)
-	flags = append([]string{"query", "-table", "jaeger", "-json", "-dir", sy.cfg.DBPath, "-cache-queries"}, flags...)
-	logger.Warnw("sybil query", "flags", flags)
+	//flags := generateFlagsFromQuery(query)
+	//flags = append([]string{"query", "-table", "jaeger", "-json", "-dir", sy.cfg.DBPath, "-cache-queries"}, flags...)
+	//logger.Warnw("sybil query", "flags", flags)
 
-	// Stop digestion while a query is running.
-	// TODO: This means that digestion is blocked.
-	sy.digestMtx.RLock()
-	cmdStartTime := time.Now()
-	cmd := exec.CommandContext(ctx, sy.cfg.BinPath, flags...)
-	out, err := cmd.CombinedOutput()
-	cmdEndTime := time.Now()
-	sy.digestMtx.RUnlock()
+	//// Stop digestion while a query is running.
+	//// TODO: This means that digestion is blocked.
+	//sy.digestMtx.RLock()
+	//cmdStartTime := time.Now()
+	//cmd := exec.CommandContext(ctx, sy.cfg.BinPath, flags...)
+	//out, err := cmd.CombinedOutput()
+	//cmdEndTime := time.Now()
+	//sy.digestMtx.RUnlock()
 
-	logger.Warnw("sybil query command exec", "duration", cmdEndTime.Sub(cmdStartTime).String())
+	//logger.Warnw("sybil query command exec", "duration", cmdEndTime.Sub(cmdStartTime).String())
 
-	if err != nil {
-		logger.Errorw("error querying", "err", err, "message", string(out))
-		return nil, err
-	}
+	//if err != nil {
+	//logger.Errorw("error querying", "err", err, "message", string(out))
+	//return nil, err
+	//}
 
-	results := make([]queryResult, 0, query.NumTraces)
-	if err := json.Unmarshal(out, &results); err != nil {
-		return nil, err
-	}
+	//results := make([]queryResult, 0, query.NumTraces)
+	//if err := json.Unmarshal(out, &results); err != nil {
+	//return nil, err
+	//}
 
-	traceIDs := make([]model.TraceID, 0, len(results))
-	for _, qr := range results {
-		tid, err := model.TraceIDFromString(qr.TraceID)
-		if err != nil {
-			return nil, err
-		}
+	//traceIDs := make([]model.TraceID, 0, len(results))
+	//for _, qr := range results {
+	//tid, err := model.TraceIDFromString(qr.TraceID)
+	//if err != nil {
+	//return nil, err
+	//}
 
-		traceIDs = append(traceIDs, tid)
-	}
+	//traceIDs = append(traceIDs, tid)
+	//}
 
-	logger.Warnw("sybil query", "duration", time.Since(start).String(), "traceIDs", len(traceIDs))
-	return traceIDs, nil
+	//logger.Warnw("sybil query", "duration", time.Since(start).String(), "traceIDs", len(traceIDs))
+	//return traceIDs, nil
 }
 
 func generateFlagsFromQuery(query *spanstore.TraceQueryParameters) []string {
@@ -420,6 +458,229 @@ func validateQuery(p *spanstore.TraceQueryParameters) error {
 		return ErrDurationMinGreaterThanMax
 	}
 	return nil
+}
+
+type sybilBlock struct {
+	sync.RWMutex
+
+	binPath   string
+	dbPath    string
+	tableName int
+
+	buffer *bytes.Buffer
+
+	// If this block accepts writes.
+	isMutable bool
+	// int columns.
+	intCols []string
+
+	digestMtx sync.RWMutex
+}
+
+func newSybilBlock(binPath, dbPath string, tableName int) *sybilBlock {
+	return &sybilBlock{
+		binPath:   binPath,
+		dbPath:    dbPath,
+		tableName: tableName,
+
+		buffer:    bytes.NewBuffer(nil),
+		isMutable: true,
+	}
+}
+
+func (syb *sybilBlock) getMutable() bool {
+	syb.RLock()
+	defer syb.RUnlock()
+	return syb.isMutable
+}
+
+func (syb *sybilBlock) setMutable(mutable bool) {
+	syb.Lock()
+	syb.isMutable = mutable
+	syb.Unlock()
+}
+
+func (syb *sybilBlock) writeSpan(span *model.Span) error {
+	mutable := syb.getMutable()
+	if !mutable {
+		logger.Warnw("write span: dropping span", "msg", "too old", "tableName", syb.tableName, "spanStart", span.StartTime.String())
+		return nil
+	}
+
+	byt, err := jsonFromSpan(span)
+	if err != nil {
+		return err
+	}
+	byt = append(byt, []byte("\n")...)
+
+	syb.Lock()
+	_, err = syb.buffer.Write(byt)
+	if err != nil {
+		syb.Unlock()
+		return err
+	}
+	syb.Unlock()
+	return nil
+}
+
+func jsonFromSpan(span *model.Span) ([]byte, error) {
+	inputMap := make(map[string]interface{})
+	inputMap[timeKey] = model.TimeAsEpochMicroseconds(span.StartTime)
+
+	// These 3 are special. The reason for the first two is that there is a GetServices() and GetOperations()
+	// lookup on the global space. I can think of easy ways to do this in a jaeger tuned columnar store, because its
+	// just loading the symbol table and not the entire column. For now, we use this hack.
+	inputMap[serviceOpPrefix+span.Process.ServiceName+serviceOpSeparator+span.OperationName] = 1
+	inputMap[serviceOnlyPrefix+span.Process.ServiceName] = 1
+	inputMap[durationKey] = span.Duration.Nanoseconds()
+
+	for _, kv := range span.Tags {
+		inputMap[tagPrefix+kv.Key] = kv.AsString()
+	}
+	for _, kv := range span.Process.Tags {
+		inputMap[tagPrefix+kv.Key] = kv.AsString()
+	}
+
+	inputMap[traceIDKey] = span.TraceID.String()
+
+	return json.Marshal(inputMap)
+}
+func (syb *sybilBlock) flushAndClearBuffer() {
+	mutable := syb.getMutable()
+	if !mutable {
+		return
+	}
+
+	syb.Lock()
+	oldBuf := syb.buffer
+	syb.buffer = bufPool.Get().(*bytes.Buffer)
+	syb.buffer.Reset()
+	syb.Unlock()
+
+	go syb.flushJSON(oldBuf)
+}
+
+func (syb *sybilBlock) flushJSON(buf *bytes.Buffer) {
+	syb.runIngest(buf.Bytes())
+
+	buf.Reset()
+	bufPool.Put(buf)
+}
+
+func (syb *sybilBlock) runIngest(b []byte) {
+	if len(b) == 0 {
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	flags := []string{"ingest", "-table", strconv.Itoa(syb.tableName), "-dir", syb.dbPath, "-skip-compact", "-save-srb"}
+	cmd := exec.CommandContext(ctx, syb.binPath, flags...)
+	cmd.Stdin = bytes.NewReader(b)
+
+	if out, err := cmd.CombinedOutput(); err != nil {
+		logger.Errorw("sybil run ingest", "err", err, "message", string(out), "table", syb.tableName, "flags", flags)
+	}
+
+}
+
+func (syb *sybilBlock) digestRowStore() {
+	mutable := syb.getMutable()
+	if !mutable {
+		return
+	}
+
+	start := time.Now()
+	ctx, cancel := context.WithTimeout(context.Background(), 25*time.Second)
+	defer cancel()
+
+	syb.digestMtx.Lock()
+
+	cmd := exec.CommandContext(ctx, syb.binPath, "digest", "-debug", "-table", strconv.Itoa(syb.tableName), "-dir", syb.dbPath)
+
+	if out, err := cmd.CombinedOutput(); err != nil {
+		logger.Errorw("sybil digest", "err", err, "message", string(out), "table", syb.tableName)
+	}
+
+	syb.digestMtx.Unlock()
+
+	logger.Warnw("sybil digest", "duration", time.Since(start).String(), "table", syb.tableName)
+	return
+}
+
+type tableInfo struct {
+	Columns struct {
+		Ints []string `json:"ints"`
+	} `json:"columns"`
+}
+
+func (syb *sybilBlock) getIntColumns(ctx context.Context) ([]string, error) {
+	mutable := syb.getMutable()
+	if !mutable && len(syb.intCols) > 0 {
+		return syb.intCols, nil
+	}
+
+	cmd := exec.CommandContext(ctx, syb.binPath, "query", "-table", strconv.Itoa(syb.tableName), "-info", "-json", "-dir", syb.dbPath)
+
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		logger.Errorw("err", err, "message", string(out))
+		return nil, err
+	}
+
+	ti := &tableInfo{}
+	if err := json.Unmarshal(out, ti); err != nil {
+		return nil, err
+	}
+
+	// TODO: Fix race.
+	if !mutable {
+		syb.intCols = ti.Columns.Ints
+	}
+
+	return ti.Columns.Ints, nil
+}
+
+func (syb *sybilBlock) getServices(ctx context.Context) ([]string, error) {
+	cols, err := syb.getIntColumns(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	services := make([]string, 10)
+	for _, col := range cols {
+		if !strings.HasPrefix(col, serviceOnlyPrefix) {
+			continue
+		}
+
+		services = append(services, strings.TrimPrefix(col, serviceOnlyPrefix))
+	}
+
+	sort.Strings(services)
+
+	return services, nil
+}
+
+func (syb *sybilBlock) getOperations(ctx context.Context, service string) ([]string, error) {
+	cols, err := syb.getIntColumns(ctx)
+
+	if err != nil {
+		return nil, err
+	}
+
+	ops := []string{}
+	prefix := serviceOpPrefix + service + serviceOpSeparator
+	for _, col := range cols {
+		if !strings.HasPrefix(col, prefix) {
+			continue
+		}
+
+		ops = append(ops, strings.TrimPrefix(col, prefix))
+	}
+
+	sort.Strings(ops)
+	return ops, nil
 }
 
 // TODO have a much simpler schema with service: service, op: op and put the getServices and getOperations into KVStore.
