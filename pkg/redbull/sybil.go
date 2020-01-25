@@ -169,7 +169,6 @@ func (sy *sybil) refreshBlocks() error {
 	for i := minPeriodToExist; i <= maxWriteAblePeriod; i++ {
 		tablesToExist[i] = struct{}{}
 	}
-	fmt.Println(minWriteAblePeriod, maxWriteAblePeriod, minPeriodToExist)
 
 	blocksDeleted := 0
 	// Nuke all tables that shouldn't exist.
