@@ -55,7 +55,7 @@ func (kv *kvstore) loop() {
 				if err != nil {
 					logger.Errorw("badger value GC", "err", err)
 				}
-				logger.Warnw("badger value GC", "duration", time.Since(start))
+				logger.Warnw("badger value GC", "duration", time.Since(start).String())
 			}
 		}
 	}

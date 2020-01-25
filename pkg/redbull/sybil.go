@@ -151,7 +151,7 @@ func (sy *sybil) deleteOldData(retention time.Duration) {
 		logger.Errorw("sybil trim", "err", err, "message", string(out))
 	}
 
-	logger.Warnw("sybil trim exec", "duration", time.Since(start))
+	logger.Warnw("sybil trim exec", "duration", time.Since(start).String())
 	return
 }
 
