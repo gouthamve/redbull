@@ -74,7 +74,7 @@ type sybil struct {
 
 	done chan struct{}
 
-	digestMtx sync.Mutex
+	digestMtx sync.RWMutex
 }
 
 func newSybil(cfg sybilConfig) sybil {
@@ -318,13 +318,13 @@ func (sy *sybil) findTraceIDs(ctx context.Context, query *spanstore.TraceQueryPa
 	logger.Warnw("sybil query", "flags", flags)
 
 	// Stop digestion while a query is running.
-	// TODO: This means that only one query can run at a time and digestion is blocked.
-	sy.digestMtx.Lock()
+	// TODO: This means that digestion is blocked.
+	sy.digestMtx.RLock()
 	cmdStartTime := time.Now()
 	cmd := exec.CommandContext(ctx, sy.cfg.BinPath, flags...)
 	out, err := cmd.CombinedOutput()
 	cmdEndTime := time.Now()
-	sy.digestMtx.Unlock()
+	sy.digestMtx.RUnlock()
 
 	logger.Warnw("sybil query command exec", "duration", cmdEndTime.Sub(cmdStartTime).String())
 
