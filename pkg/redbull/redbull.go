@@ -165,6 +165,8 @@ func (rb *redbull) FindTraceIDs(ctx context.Context, query *spanstore.TraceQuery
 	return rb.sybil.findTraceIDs(ctx, query)
 }
 func (rb *redbull) WriteSpan(span *model.Span) error {
+	// TODO: Reject old writes.
+
 	// Write to KV Store.
 	if err := rb.kv.addSpan(span); err != nil {
 		return err
