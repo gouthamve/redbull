@@ -659,7 +659,7 @@ func (syb *sybilBlock) getServices(ctx context.Context) ([]string, error) {
 		return nil, err
 	}
 
-	services := make([]string, 10)
+	services := make([]string, 0, 10)
 	for _, col := range cols {
 		if !strings.HasPrefix(col, serviceOnlyPrefix) {
 			continue
