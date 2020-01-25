@@ -336,25 +336,6 @@ func (sy *sybil) findTraceIDs(ctx context.Context, query *spanstore.TraceQueryPa
 		return nil, err
 	}
 
-	// Make sure the column exists.
-	validOp := false || query.OperationName == ""
-	if !validOp {
-		ops, err := sy.getOperations(ctx, query.ServiceName)
-		if err != nil {
-			return nil, err
-		}
-		for _, op := range ops {
-			if op == query.OperationName {
-				validOp = true
-			}
-		}
-	}
-
-	// Short circuit if the operation doesn't exist in db.
-	if !validOp {
-		return nil, nil
-	}
-
 	// Get all the relevant blocks to query.
 	retentionTime := time.Now().Add(-sy.cfg.Retention)
 	if retentionTime.After(query.StartTimeMin) {
@@ -695,6 +676,36 @@ func (syb *sybilBlock) getOperations(ctx context.Context, service string) ([]str
 }
 
 func (syb *sybilBlock) query(ctx context.Context, query *spanstore.TraceQueryParameters) ([]string, error) {
+	// Make sure the column exists.
+	validOp := false
+	if query.OperationName != "" {
+		ops, err := syb.getOperations(ctx, query.ServiceName)
+		if err != nil {
+			return nil, err
+		}
+		for _, op := range ops {
+			if op == query.OperationName {
+				validOp = true
+			}
+		}
+	} else {
+		services, err := syb.getServices(ctx)
+		if err != nil {
+			return nil, err
+		}
+
+		for _, svc := range services {
+			if svc == query.ServiceName {
+				validOp = true
+			}
+		}
+	}
+
+	// Short circuit if the operation doesn't exist in db.
+	if !validOp {
+		return nil, nil
+	}
+
 	flags := generateFlagsFromQuery(query)
 	flags = append([]string{"query", "-table", strconv.Itoa(syb.tableName), "-json", "-dir", syb.dbPath, "-cache-queries"}, flags...)
 	logger.Warnw("sybil query", "flags", strings.Join(flags, " "))
