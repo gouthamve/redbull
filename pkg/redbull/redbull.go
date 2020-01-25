@@ -36,11 +36,13 @@ func NewFactory() *Factory {
 	return &Factory{}
 }
 
+// AddFlags implements plugin.Configurable.
 func (f *Factory) AddFlags(flagset *flag.FlagSet) {
 	flagset.Duration(retentionFlag, 24*time.Hour, "The retention period for redbull.")
 	flagset.String(dataDirFlag, "/data/", "The data directory for redbull.")
 }
 
+// InitFromViper implements plugin.Configurable.
 func (f *Factory) InitFromViper(v *viper.Viper) {
 	f.cfg.retention = v.GetDuration(retentionFlag)
 	f.cfg.dataDir = v.GetString(dataDirFlag)
@@ -77,6 +79,7 @@ type redbull struct {
 	kv    *kvstore
 }
 
+// Config holds the configuration for redbull.
 type Config struct {
 	retention time.Duration
 	dataDir   string
@@ -101,6 +104,7 @@ func NewRedBull(cfg Config) (*redbull, error) {
 	}
 
 	rb.sybil.start()
+	rb.kv.start()
 
 	return rb, nil
 }

@@ -88,10 +88,10 @@ func newSybil(cfg sybilConfig) sybil {
 }
 
 func (sy *sybil) start() {
-	go sy.retentionLoop()
+	go sy.loop()
 }
 
-func (sy *sybil) retentionLoop() {
+func (sy *sybil) loop() {
 	retentionTicker := time.NewTicker(10 * time.Minute)
 	digestTicker := time.NewTicker(2 * time.Second)
 	defer retentionTicker.Stop()

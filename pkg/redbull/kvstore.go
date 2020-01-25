@@ -17,9 +17,10 @@ type kvstore struct {
 
 	badger *badger.DB
 
+	entriesMutex    sync.Mutex
 	entriesInFlight []*badger.Entry
 
-	entriesMutex sync.Mutex
+	done chan struct{}
 }
 
 func newKVStore(dir string, retention time.Duration) (*kvstore, error) {
@@ -30,10 +31,38 @@ func newKVStore(dir string, retention time.Duration) (*kvstore, error) {
 	return &kvstore{
 		badger:    db,
 		retention: retention,
+
+		done: make(chan struct{}),
 	}, nil
 }
 
+func (kv *kvstore) start() {
+	go kv.loop()
+}
+
+func (kv *kvstore) loop() {
+	valueGCTicker := time.NewTicker(5 * time.Minute)
+	defer valueGCTicker.Stop()
+	for {
+		select {
+		case <-kv.done:
+			return
+		case <-valueGCTicker.C:
+			var err error
+			for err == nil {
+				start := time.Now()
+				err = kv.badger.RunValueLogGC(0.5)
+				if err != nil {
+					logger.Errorw("badger value GC", "err", err)
+				}
+				logger.Warnw("badger value GC", "duration", time.Since(start))
+			}
+		}
+	}
+}
+
 func (kv *kvstore) stop() error {
+	close(kv.done)
 	return kv.badger.Close()
 }
 
