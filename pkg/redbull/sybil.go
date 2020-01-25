@@ -332,68 +332,80 @@ type queryResult struct {
 }
 
 func (sy *sybil) findTraceIDs(ctx context.Context, query *spanstore.TraceQueryParameters) ([]model.TraceID, error) {
-	return nil, nil
-	//start := time.Now()
-	//if err := validateQuery(query); err != nil {
-	//return nil, err
-	//}
+	start := time.Now()
+	if err := validateQuery(query); err != nil {
+		return nil, err
+	}
 
-	//// Make sure the column exists.
-	//validOp := false || query.OperationName == ""
-	//if !validOp {
-	//ops, err := sy.getOperations(ctx, query.ServiceName)
-	//if err != nil {
-	//return nil, err
-	//}
-	//for _, op := range ops {
-	//if op == query.OperationName {
-	//validOp = true
-	//}
-	//}
-	//}
+	// Make sure the column exists.
+	validOp := false || query.OperationName == ""
+	if !validOp {
+		ops, err := sy.getOperations(ctx, query.ServiceName)
+		if err != nil {
+			return nil, err
+		}
+		for _, op := range ops {
+			if op == query.OperationName {
+				validOp = true
+			}
+		}
+	}
 
-	//// Short circuit if the operation doesn't exist in db.
-	//if !validOp {
-	//return nil, nil
-	//}
+	// Short circuit if the operation doesn't exist in db.
+	if !validOp {
+		return nil, nil
+	}
 
-	//flags := generateFlagsFromQuery(query)
-	//flags = append([]string{"query", "-table", "jaeger", "-json", "-dir", sy.cfg.DBPath, "-cache-queries"}, flags...)
-	//logger.Warnw("sybil query", "flags", flags)
+	// Get all the relevant blocks to query.
+	retentionTime := time.Now().Add(-sy.cfg.Retention)
+	if retentionTime.After(query.StartTimeMin) {
+		query.StartTimeMin = retentionTime
+	}
+	maxFutureTime := time.Now().Add(maxRecordInFuture)
+	if maxFutureTime.Before(query.StartTimeMax) {
+		query.StartTimeMax = maxFutureTime
+	}
 
-	//// Stop digestion while a query is running.
-	//// TODO: This means that digestion is blocked.
-	//sy.digestMtx.RLock()
-	//cmdStartTime := time.Now()
-	//cmd := exec.CommandContext(ctx, sy.cfg.BinPath, flags...)
-	//out, err := cmd.CombinedOutput()
-	//cmdEndTime := time.Now()
-	//sy.digestMtx.RUnlock()
+	minPeriod := query.StartTimeMin.UnixNano() / periodPerBlock
+	maxPeriod := query.StartTimeMax.UnixNano() / periodPerBlock
+	traceIDsMap := make(map[string]struct{}, query.NumTraces)
 
-	//logger.Warnw("sybil query command exec", "duration", cmdEndTime.Sub(cmdStartTime).String())
+	// TODO: Do some intelligent paralellising later.
+	for i := maxPeriod; i >= minPeriod; i-- {
+		sy.blocksMtx.RLock()
+		block, ok := sy.blocks[int(i)]
+		sy.blocksMtx.RUnlock()
+		if !ok {
+			logger.Warnw("missing block for valid time", "table", i, "now", time.Now().String())
+			continue
+		}
 
-	//if err != nil {
-	//logger.Errorw("error querying", "err", err, "message", string(out))
-	//return nil, err
-	//}
+		traceIDs, err := block.query(ctx, query)
+		if err != nil {
+			return nil, err
+		}
 
-	//results := make([]queryResult, 0, query.NumTraces)
-	//if err := json.Unmarshal(out, &results); err != nil {
-	//return nil, err
-	//}
+		for _, tid := range traceIDs {
+			traceIDsMap[tid] = struct{}{}
+		}
 
-	//traceIDs := make([]model.TraceID, 0, len(results))
-	//for _, qr := range results {
-	//tid, err := model.TraceIDFromString(qr.TraceID)
-	//if err != nil {
-	//return nil, err
-	//}
+		if len(traceIDsMap) >= query.NumTraces {
+			break
+		}
+	}
 
-	//traceIDs = append(traceIDs, tid)
-	//}
+	traceIDs := make([]model.TraceID, 0, len(traceIDsMap))
+	for tidStr := range traceIDsMap {
+		tid, err := model.TraceIDFromString(tidStr)
+		if err != nil {
+			return nil, err
+		}
 
-	//logger.Warnw("sybil query", "duration", time.Since(start).String(), "traceIDs", len(traceIDs))
-	//return traceIDs, nil
+		traceIDs = append(traceIDs, tid)
+	}
+
+	logger.Warnw("sybil query", "duration", time.Since(start).String(), "traceIDs", len(traceIDs))
+	return traceIDs, nil
 }
 
 func generateFlagsFromQuery(query *spanstore.TraceQueryParameters) []string {
@@ -681,6 +693,40 @@ func (syb *sybilBlock) getOperations(ctx context.Context, service string) ([]str
 
 	sort.Strings(ops)
 	return ops, nil
+}
+
+func (syb *sybilBlock) query(ctx context.Context, query *spanstore.TraceQueryParameters) ([]string, error) {
+	flags := generateFlagsFromQuery(query)
+	flags = append([]string{"query", "-table", strconv.Itoa(syb.tableName), "-json", "-dir", syb.dbPath, "-cache-queries"}, flags...)
+	logger.Warnw("sybil query", "flags", strings.Join(flags, " "))
+
+	// Stop digestion while a query is running.
+	// TODO: This means that digestion is blocked.
+	syb.digestMtx.RLock()
+	cmdStartTime := time.Now()
+	cmd := exec.CommandContext(ctx, syb.binPath, flags...)
+	out, err := cmd.CombinedOutput()
+	cmdEndTime := time.Now()
+	syb.digestMtx.RUnlock()
+
+	logger.Warnw("sybil query command exec", "duration", cmdEndTime.Sub(cmdStartTime).String())
+
+	if err != nil {
+		logger.Errorw("error querying", "err", err, "message", string(out))
+		return nil, err
+	}
+
+	results := make([]queryResult, 0, query.NumTraces)
+	if err := json.Unmarshal(out, &results); err != nil {
+		return nil, err
+	}
+
+	traceIDs := make([]string, 0, len(results))
+	for _, qr := range results {
+		traceIDs = append(traceIDs, qr.TraceID)
+	}
+
+	return traceIDs, nil
 }
 
 // TODO have a much simpler schema with service: service, op: op and put the getServices and getOperations into KVStore.
