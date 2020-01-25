@@ -134,18 +134,24 @@ func (sy *sybil) deleteOldData(retention time.Duration) {
 	if retention == 0 {
 		return
 	}
+	start := time.Now()
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Second)
 	defer cancel()
 
+	// Generate the flags for deletion
 	retentionTime := time.Now().Add(-retention).UnixNano() / 1000
-	cmd := exec.CommandContext(ctx, sy.cfg.BinPath, "trim", "-table", "jaeger", "-dir", sy.cfg.DBPath,
-		"-time-col", "time", "-before", strconv.FormatInt(retentionTime, 10), "-delete", "-really")
+	flags := []string{"-time-col", "time", "-before", strconv.FormatInt(retentionTime, 10), "-delete", "-really"}
+	flags = append([]string{"trim", "-table", "jaeger", "-dir", sy.cfg.DBPath}, flags...)
+	logger.Warnw("sybil trim", "flags", flags)
+
+	cmd := exec.CommandContext(ctx, sy.cfg.BinPath, flags...)
 
 	if out, err := cmd.CombinedOutput(); err != nil {
 		logger.Errorw("sybil trim", "err", err, "message", string(out))
 	}
 
+	logger.Warnw("sybil trim exec", "duration", time.Since(start))
 	return
 }
 
