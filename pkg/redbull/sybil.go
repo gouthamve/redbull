@@ -615,10 +615,12 @@ func (syb *sybilBlock) getIntColumns(ctx context.Context) ([]string, error) {
 
 	flags := []string{"query", "-table", strconv.Itoa(syb.tableName), "-info", "-json", "-dir", syb.dbPath}
 	cmd := exec.CommandContext(ctx, syb.binPath, flags...)
+	errBuf := bytes.NewBuffer(nil)
+	cmd.Stderr = errBuf
 
-	out, err := cmd.CombinedOutput()
+	out, err := cmd.Output()
 	if err != nil {
-		logger.Errorw("get intCols", "err", err, "message", string(out), "flags", strings.Join(flags, " "))
+		logger.Errorw("get intCols", "err", err, "stdout", string(out), "stderr", string(errBuf.Bytes()), "flags", strings.Join(flags, " "))
 		return nil, err
 	}
 
@@ -717,14 +719,16 @@ func (syb *sybilBlock) query(ctx context.Context, query *spanstore.TraceQueryPar
 	syb.digestMtx.RLock()
 	cmdStartTime := time.Now()
 	cmd := exec.CommandContext(ctx, syb.binPath, flags...)
-	out, err := cmd.CombinedOutput()
+	errBuf := bytes.NewBuffer(nil)
+	cmd.Stderr = errBuf
+	out, err := cmd.Output()
 	cmdEndTime := time.Now()
 	syb.digestMtx.RUnlock()
 
 	logger.Warnw("sybil query command exec", "duration", cmdEndTime.Sub(cmdStartTime).String())
 
 	if err != nil {
-		logger.Errorw("error querying", "err", err, "message", string(out))
+		logger.Errorw("error querying", "err", err, "stdout", string(out), "stderr", string(errBuf.Bytes()))
 		return nil, err
 	}
 
