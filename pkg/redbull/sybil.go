@@ -613,16 +613,18 @@ func (syb *sybilBlock) getIntColumns(ctx context.Context) ([]string, error) {
 		return syb.intCols, nil
 	}
 
-	cmd := exec.CommandContext(ctx, syb.binPath, "query", "-table", strconv.Itoa(syb.tableName), "-info", "-json", "-dir", syb.dbPath)
+	flags := []string{"query", "-table", strconv.Itoa(syb.tableName), "-info", "-json", "-dir", syb.dbPath}
+	cmd := exec.CommandContext(ctx, syb.binPath, flags...)
 
 	out, err := cmd.CombinedOutput()
 	if err != nil {
-		logger.Errorw("err", err, "message", string(out))
+		logger.Errorw("get intCols", "err", err, "message", string(out), "flags", strings.Join(flags, " "))
 		return nil, err
 	}
 
 	ti := &tableInfo{}
 	if err := json.Unmarshal(out, ti); err != nil {
+		logger.Errorw("get intCols Unmarshal", "err", err, "message", string(out), "flags", strings.Join(flags, " "))
 		return nil, err
 	}
 
