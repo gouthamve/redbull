@@ -51,7 +51,7 @@ func (kv *kvstore) loop() {
 			var err error
 			for err == nil {
 				start := time.Now()
-				err = kv.badger.RunValueLogGC(0.5)
+				err = kv.badger.RunValueLogGC(0.33)
 				if err != nil {
 					logger.Errorw("badger value GC", "err", err)
 				}
